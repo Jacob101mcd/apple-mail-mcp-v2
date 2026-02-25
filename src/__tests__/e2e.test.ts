@@ -28,7 +28,7 @@ const EXPECTED_TOOLS = [
 ];
 
 // Helper function to create a mock server with handlers
-function createMockServer() {
+function createMockServer(): Server {
   const server = new Server(
     {
       name: 'apple-mail-mcp',
@@ -74,7 +74,7 @@ type ToolHandler = (args: Record<string, unknown>) => {
 
 function createToolHandlers(): Record<string, ToolHandler> {
   return {
-    mail_get_accounts: () => {
+    mail_get_accounts: (): ReturnType<ToolHandler> => {
       const script = `
 tell application "Mail"
   set accountList to ""
@@ -88,7 +88,7 @@ end tell`;
       return { content: [{ type: 'text', text: `Email Accounts:\n${result}` }] };
     },
 
-    mail_get_mailboxes: (args: Record<string, unknown>) => {
+    mail_get_mailboxes: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const account = args.account as string | undefined;
       const script = account
         ? `
@@ -122,7 +122,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_get_unread: (args: Record<string, unknown>) => {
+    mail_get_unread: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const {
         account,
         mailbox = 'INBOX',
@@ -164,7 +164,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_get_recent: (args: Record<string, unknown>) => {
+    mail_get_recent: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const {
         account,
         mailbox = 'INBOX',
@@ -209,7 +209,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_get_email: (args: Record<string, unknown>) => {
+    mail_get_email: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const emailId = args.emailId as string;
       const script = `
 tell application "Mail"
@@ -231,7 +231,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_search: (args: Record<string, unknown>) => {
+    mail_search: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const { query, limit = 20 } = args as { query: string; limit?: number };
       const script = `
 tell application "Mail"
@@ -273,7 +273,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_send: (args: Record<string, unknown>) => {
+    mail_send: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const { to, subject, body, cc, bcc } = args as {
         to: string;
         subject: string;
@@ -296,7 +296,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_reply: (args: Record<string, unknown>) => {
+    mail_reply: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const {
         emailId,
         body,
@@ -325,7 +325,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_mark_read: (args: Record<string, unknown>) => {
+    mail_mark_read: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const { emailId, mailbox, account } = args as {
         emailId: string;
         mailbox?: string;
@@ -364,7 +364,7 @@ end tell`;
       }
     },
 
-    mail_mark_unread: (args: Record<string, unknown>) => {
+    mail_mark_unread: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const emailId = args.emailId as string;
       const script = `
 tell application "Mail"
@@ -383,7 +383,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_delete: (args: Record<string, unknown>) => {
+    mail_delete: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const emailId = args.emailId as string;
       const script = `
 tell application "Mail"
@@ -402,7 +402,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_move: (args: Record<string, unknown>) => {
+    mail_move: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const { emailId, toMailbox, toAccount } = args as {
         emailId: string;
         toMailbox: string;
@@ -435,7 +435,7 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_unread_count: (args: Record<string, unknown>) => {
+    mail_unread_count: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
       const account = args.account as string | undefined;
       const script = `
 tell application "Mail"
@@ -465,12 +465,12 @@ end tell`;
       return { content: [{ type: 'text', text: result }] };
     },
 
-    mail_open: () => {
+    mail_open: (): ReturnType<ToolHandler> => {
       runAppleScript('tell application "Mail" to activate');
       return { content: [{ type: 'text', text: 'Mail app opened' }] };
     },
 
-    mail_check: () => {
+    mail_check: (): ReturnType<ToolHandler> => {
       runAppleScript('tell application "Mail" to check for new mail');
       return { content: [{ type: 'text', text: 'Checking for new mail...' }] };
     },
@@ -1072,7 +1072,7 @@ describe('Apple Mail MCP Server - End-to-End Tests', () => {
   describe('Unknown Tool Handling', () => {
     it('should handle unknown tool names', () => {
       // Simulating the server behavior for unknown tools
-      const handleUnknownTool = (name: string) => {
+      const handleUnknownTool = (name: string): ReturnType<ToolHandler> & { isError: boolean } => {
         return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
       };
 
