@@ -36,6 +36,7 @@ APPLESCRIPT_EOF`);
     const result = execSync(`osascript '${tempFile}'`, {
       encoding: 'utf-8',
       maxBuffer: 50 * 1024 * 1024,
+      timeout: 60000,
     }).trim();
     execSync(`rm -f '${tempFile}'`);
     return result;
@@ -501,44 +502,58 @@ end tell`;
         const safeDateFrom = dateFrom ? escapeAppleScript(dateFrom) : '';
         const safeDateTo = dateTo ? escapeAppleScript(dateTo) : '';
 
-        // Build match conditions based on searchIn parameter
-        let matchChecks = '';
-        if (!searchIn || searchIn === 'subject' || searchIn === 'all') {
-          matchChecks += `
-            try
-              if (subject of msg as text) contains "${safeQuery}" then set matched to true
-            end try`;
-        }
-        if (!searchIn || searchIn === 'sender' || searchIn === 'all') {
-          matchChecks += `
-            try
-              if (sender of msg as text) contains "${safeQuery}" then set matched to true
-            end try`;
-        }
-        if (searchIn === 'recipients' || searchIn === 'all') {
-          matchChecks += `
-            try
-              repeat with r in to recipients of msg
-                if (address of r as text) contains "${safeQuery}" then set matched to true
-              end repeat
-            end try`;
-        }
-        if (searchIn === 'content' || searchIn === 'all') {
-          matchChecks += `
-            try
-              if (content of msg as text) contains "${safeQuery}" then set matched to true
-            end try`;
+        // Post-filter to enforce field-specific matching on native search results.
+        // Mail's built-in search (Spotlight-backed) finds candidates quickly;
+        // we only inspect individual message fields on that small result set.
+        let postFilter = '';
+        if (searchIn === 'subject') {
+          postFilter = `
+          try
+            if not ((subject of msg as text) contains "${safeQuery}") then set matched to false
+          end try`;
+        } else if (searchIn === 'sender') {
+          postFilter = `
+          try
+            if not ((sender of msg as text) contains "${safeQuery}") then set matched to false
+          end try`;
+        } else if (searchIn === 'recipients') {
+          postFilter = `
+          set matched to false
+          try
+            repeat with r in to recipients of msg
+              if (address of r as text) contains "${safeQuery}" then set matched to true
+            end repeat
+          end try`;
+        } else if (searchIn === 'content') {
+          postFilter = `
+          try
+            if not ((content of msg as text) contains "${safeQuery}") then set matched to false
+          end try`;
+        } else {
+          // Default (no searchIn or 'all'): for 'all' the native search already covers all
+          // fields; for default keep historic subject+sender behaviour by post-filtering.
+          if (!searchIn) {
+            postFilter = `
+          set subjectMatch to false
+          set senderMatch to false
+          try
+            if (subject of msg as text) contains "${safeQuery}" then set subjectMatch to true
+          end try
+          try
+            if (sender of msg as text) contains "${safeQuery}" then set senderMatch to true
+          end try
+          if not (subjectMatch or senderMatch) then set matched to false`;
+          }
         }
 
-        // Build date filter checks
         let dateChecks = '';
         if (dateFrom) {
           dateChecks += `
-              if (date received of msg) < date "${safeDateFrom}" then set matched to false`;
+          if (date received of msg) < date "${safeDateFrom}" then set matched to false`;
         }
         if (dateTo) {
           dateChecks += `
-              if (date received of msg) > date "${safeDateTo}" then set matched to false`;
+          if (date received of msg) > date "${safeDateTo}" then set matched to false`;
         }
 
         const script = `
@@ -547,34 +562,41 @@ tell application "Mail"
   set resultCount to 0
   repeat with acct in accounts
     ${account ? `if name of acct is "${safeAccount}" then` : ''}
-    ${mailbox ? `set mbList to {mailbox "${safeMailbox}" of acct}` : 'set mbList to mailboxes of acct'}
+    ${
+      mailbox
+        ? `set mbList to {}
+    try
+      set end of mbList to mailbox "${safeMailbox}" of acct
+    end try`
+        : 'set mbList to mailboxes of acct'
+    }
     repeat with mb in mbList
       try
-        repeat with msg in messages of mb
-          if resultCount < ${limit} then
-            set matched to false${matchChecks}
-            if matched then${dateChecks}
-            end if
-            if matched then
-              set msgId to id of msg
-              set msgSubject to subject of msg
-              set msgSender to sender of msg
-              set msgDate to date received of msg
-              set isRead to read status of msg
-              set readMarker to ""
-              if not isRead then set readMarker to "[UNREAD] "
-              set results to results & readMarker & "ID: " & msgId & linefeed
-              set results to results & "From: " & msgSender & linefeed
-              set results to results & "Subject: " & msgSubject & linefeed
-              set results to results & "Date: " & msgDate & linefeed
-              set results to results & "Location: " & name of acct & " / " & name of mb & linefeed & linefeed
-              set resultCount to resultCount + 1
-            end if
+        set found to search mb for "${safeQuery}"
+        repeat with msg in found
+          if resultCount >= ${limit} then exit repeat
+          set matched to true${postFilter}${dateChecks}
+          if matched then
+            set msgId to id of msg
+            set msgSubject to subject of msg
+            set msgSender to sender of msg
+            set msgDate to date received of msg
+            set isRead to read status of msg
+            set readMarker to ""
+            if not isRead then set readMarker to "[UNREAD] "
+            set results to results & readMarker & "ID: " & msgId & linefeed
+            set results to results & "From: " & msgSender & linefeed
+            set results to results & "Subject: " & msgSubject & linefeed
+            set results to results & "Date: " & msgDate & linefeed
+            set results to results & "Location: " & name of acct & " / " & name of mb & linefeed & linefeed
+            set resultCount to resultCount + 1
           end if
         end repeat
       end try
+      if resultCount >= ${limit} then exit repeat
     end repeat
     ${account ? 'end if' : ''}
+    if resultCount >= ${limit} then exit repeat
   end repeat
   if results is "" then return "No emails found matching: ${safeQuery}"
   return results

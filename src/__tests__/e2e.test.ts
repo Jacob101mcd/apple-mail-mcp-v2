@@ -254,44 +254,53 @@ end tell`;
         limit?: number;
       };
 
-      // Build match conditions based on searchIn parameter
-      let matchChecks = '';
-      if (!searchIn || searchIn === 'subject' || searchIn === 'all') {
-        matchChecks += `
-            try
-              if (subject of msg as text) contains "${query}" then set matched to true
-            end try`;
-      }
-      if (!searchIn || searchIn === 'sender' || searchIn === 'all') {
-        matchChecks += `
-            try
-              if (sender of msg as text) contains "${query}" then set matched to true
-            end try`;
-      }
-      if (searchIn === 'recipients' || searchIn === 'all') {
-        matchChecks += `
-            try
-              repeat with r in to recipients of msg
-                if (address of r as text) contains "${query}" then set matched to true
-              end repeat
-            end try`;
-      }
-      if (searchIn === 'content' || searchIn === 'all') {
-        matchChecks += `
-            try
-              if (content of msg as text) contains "${query}" then set matched to true
-            end try`;
+      let postFilter = '';
+      if (searchIn === 'subject') {
+        postFilter = `
+          try
+            if not ((subject of msg as text) contains "${query}") then set matched to false
+          end try`;
+      } else if (searchIn === 'sender') {
+        postFilter = `
+          try
+            if not ((sender of msg as text) contains "${query}") then set matched to false
+          end try`;
+      } else if (searchIn === 'recipients') {
+        postFilter = `
+          set matched to false
+          try
+            repeat with r in to recipients of msg
+              if (address of r as text) contains "${query}" then set matched to true
+            end repeat
+          end try`;
+      } else if (searchIn === 'content') {
+        postFilter = `
+          try
+            if not ((content of msg as text) contains "${query}") then set matched to false
+          end try`;
+      } else {
+        if (!searchIn) {
+          postFilter = `
+          set subjectMatch to false
+          set senderMatch to false
+          try
+            if (subject of msg as text) contains "${query}" then set subjectMatch to true
+          end try
+          try
+            if (sender of msg as text) contains "${query}" then set senderMatch to true
+          end try
+          if not (subjectMatch or senderMatch) then set matched to false`;
+        }
       }
 
-      // Build date filter checks
       let dateChecks = '';
       if (dateFrom) {
         dateChecks += `
-              if (date received of msg) < date "${dateFrom}" then set matched to false`;
+          if (date received of msg) < date "${dateFrom}" then set matched to false`;
       }
       if (dateTo) {
         dateChecks += `
-              if (date received of msg) > date "${dateTo}" then set matched to false`;
+          if (date received of msg) > date "${dateTo}" then set matched to false`;
       }
 
       const script = `
@@ -300,34 +309,41 @@ tell application "Mail"
   set resultCount to 0
   repeat with acct in accounts
     ${account ? `if name of acct is "${account}" then` : ''}
-    ${mailbox ? `set mbList to {mailbox "${mailbox}" of acct}` : 'set mbList to mailboxes of acct'}
+    ${
+      mailbox
+        ? `set mbList to {}
+    try
+      set end of mbList to mailbox "${mailbox}" of acct
+    end try`
+        : 'set mbList to mailboxes of acct'
+    }
     repeat with mb in mbList
       try
-        repeat with msg in messages of mb
-          if resultCount < ${limit} then
-            set matched to false${matchChecks}
-            if matched then${dateChecks}
-            end if
-            if matched then
-              set msgId to id of msg
-              set msgSubject to subject of msg
-              set msgSender to sender of msg
-              set msgDate to date received of msg
-              set isRead to read status of msg
-              set readMarker to ""
-              if not isRead then set readMarker to "[UNREAD] "
-              set results to results & readMarker & "ID: " & msgId & linefeed
-              set results to results & "From: " & msgSender & linefeed
-              set results to results & "Subject: " & msgSubject & linefeed
-              set results to results & "Date: " & msgDate & linefeed
-              set results to results & "Location: " & name of acct & " / " & name of mb & linefeed & linefeed
-              set resultCount to resultCount + 1
-            end if
+        set found to search mb for "${query}"
+        repeat with msg in found
+          if resultCount >= ${limit} then exit repeat
+          set matched to true${postFilter}${dateChecks}
+          if matched then
+            set msgId to id of msg
+            set msgSubject to subject of msg
+            set msgSender to sender of msg
+            set msgDate to date received of msg
+            set isRead to read status of msg
+            set readMarker to ""
+            if not isRead then set readMarker to "[UNREAD] "
+            set results to results & readMarker & "ID: " & msgId & linefeed
+            set results to results & "From: " & msgSender & linefeed
+            set results to results & "Subject: " & msgSubject & linefeed
+            set results to results & "Date: " & msgDate & linefeed
+            set results to results & "Location: " & name of acct & " / " & name of mb & linefeed & linefeed
+            set resultCount to resultCount + 1
           end if
         end repeat
       end try
+      if resultCount >= ${limit} then exit repeat
     end repeat
     ${account ? 'end if' : ''}
+    if resultCount >= ${limit} then exit repeat
   end repeat
   if results is "" then return "No emails found matching: ${query}"
   return results
@@ -955,10 +971,11 @@ describe('Apple Mail MCP Server - End-to-End Tests', () => {
         handlers.mail_search({ query: 'test', searchIn: 'all' });
 
         const scriptCall = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptCall).toContain('(subject of msg as text) contains');
-        expect(scriptCall).toContain('(sender of msg as text) contains');
-        expect(scriptCall).toContain('to recipients of msg');
-        expect(scriptCall).toContain('(content of msg as text) contains');
+        // With the native search approach, searchIn='all' relies on Mail's built-in
+        // index to cover all fields — no per-field post-filter is needed.
+        expect(scriptCall).toContain('search mb for "test"');
+        expect(scriptCall).not.toContain('(subject of msg as text) contains');
+        expect(scriptCall).not.toContain('(content of msg as text) contains');
       });
 
       it('should search subject and sender by default', () => {
