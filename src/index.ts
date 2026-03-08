@@ -499,24 +499,40 @@ end tell`;
         const safeQuery = escapeAppleScript(query);
         const safeAccount = account ? escapeAppleScript(account) : '';
         const safeMailbox = mailbox ? escapeAppleScript(mailbox) : '';
-        const safeDateFrom = dateFrom ? escapeAppleScript(dateFrom) : '';
-        const safeDateTo = dateTo ? escapeAppleScript(dateTo) : '';
 
-        // Post-filter to enforce field-specific matching on native search results.
-        // Mail's built-in search (Spotlight-backed) finds candidates quickly;
-        // we only inspect individual message fields on that small result set.
-        let postFilter = '';
+        // Convert ISO date (YYYY-MM-DD) to AppleScript date literal (Month D, YYYY)
+        const monthNames = [
+          'January',
+          'February',
+          'March',
+          'April',
+          'May',
+          'June',
+          'July',
+          'August',
+          'September',
+          'October',
+          'November',
+          'December',
+        ];
+        const isoToAppleScriptDate = (iso: string): string => {
+          const [year, month, day] = iso.split('-').map(Number);
+          return `${monthNames[month - 1]} ${day}, ${year}`;
+        };
+
+        // Use whose-clause filtering — avoids the broken `search mb for` syntax
+        // and works reliably across macOS versions.
+        let getMessages: string;
+        let postFilter: string;
+
         if (searchIn === 'subject') {
-          postFilter = `
-          try
-            if not ((subject of msg as text) contains "${safeQuery}") then set matched to false
-          end try`;
+          getMessages = `messages of mb whose subject contains "${safeQuery}"`;
+          postFilter = '';
         } else if (searchIn === 'sender') {
-          postFilter = `
-          try
-            if not ((sender of msg as text) contains "${safeQuery}") then set matched to false
-          end try`;
+          getMessages = `messages of mb whose sender contains "${safeQuery}"`;
+          postFilter = '';
         } else if (searchIn === 'recipients') {
+          getMessages = `messages of mb`;
           postFilter = `
           set matched to false
           try
@@ -525,35 +541,46 @@ end tell`;
             end repeat
           end try`;
         } else if (searchIn === 'content') {
+          getMessages = `messages of mb`;
           postFilter = `
           try
             if not ((content of msg as text) contains "${safeQuery}") then set matched to false
           end try`;
+        } else if (searchIn === 'all') {
+          getMessages = `messages of mb`;
+          postFilter = `
+          set anyMatch to false
+          try
+            if (subject of msg as text) contains "${safeQuery}" then set anyMatch to true
+          end try
+          try
+            if (sender of msg as text) contains "${safeQuery}" then set anyMatch to true
+          end try
+          try
+            repeat with r in to recipients of msg
+              if (address of r as text) contains "${safeQuery}" then set anyMatch to true
+            end repeat
+          end try
+          try
+            if (content of msg as text) contains "${safeQuery}" then set anyMatch to true
+          end try
+          if not anyMatch then set matched to false`;
         } else {
-          // Default (no searchIn or 'all'): for 'all' the native search already covers all
-          // fields; for default keep historic subject+sender behaviour by post-filtering.
-          if (!searchIn) {
-            postFilter = `
-          set subjectMatch to false
-          set senderMatch to false
-          try
-            if (subject of msg as text) contains "${safeQuery}" then set subjectMatch to true
-          end try
-          try
-            if (sender of msg as text) contains "${safeQuery}" then set senderMatch to true
-          end try
-          if not (subjectMatch or senderMatch) then set matched to false`;
-          }
+          // Default (no searchIn): match subject or sender
+          getMessages = `messages of mb whose (subject contains "${safeQuery}" or sender contains "${safeQuery}")`;
+          postFilter = '';
         }
 
         let dateChecks = '';
         if (dateFrom) {
+          const appleScriptDateFrom = isoToAppleScriptDate(dateFrom);
           dateChecks += `
-          if (date received of msg) < date "${safeDateFrom}" then set matched to false`;
+          if (date received of msg) < date "${appleScriptDateFrom}" then set matched to false`;
         }
         if (dateTo) {
+          const appleScriptDateTo = isoToAppleScriptDate(dateTo);
           dateChecks += `
-          if (date received of msg) > date "${safeDateTo}" then set matched to false`;
+          if (date received of msg) > date "${appleScriptDateTo}" then set matched to false`;
         }
 
         const script = `
@@ -572,7 +599,7 @@ tell application "Mail"
     }
     repeat with mb in mbList
       try
-        set found to search mb for "${safeQuery}"
+        set found to ${getMessages}
         repeat with msg in found
           if resultCount >= ${limit} then exit repeat
           set matched to true${postFilter}${dateChecks}
