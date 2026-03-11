@@ -254,18 +254,17 @@ end tell`;
         limit?: number;
       };
 
-      let postFilter = '';
+      let getMessages: string;
+      let postFilter: string;
+
       if (searchIn === 'subject') {
-        postFilter = `
-          try
-            if not ((subject of msg as text) contains "${query}") then set matched to false
-          end try`;
+        getMessages = `messages of mb whose subject contains "${query}"`;
+        postFilter = '';
       } else if (searchIn === 'sender') {
-        postFilter = `
-          try
-            if not ((sender of msg as text) contains "${query}") then set matched to false
-          end try`;
+        getMessages = `messages of mb whose sender contains "${query}"`;
+        postFilter = '';
       } else if (searchIn === 'recipients') {
+        getMessages = `messages of mb`;
         postFilter = `
           set matched to false
           try
@@ -274,23 +273,34 @@ end tell`;
             end repeat
           end try`;
       } else if (searchIn === 'content') {
+        getMessages = `messages of mb`;
         postFilter = `
           try
             if not ((content of msg as text) contains "${query}") then set matched to false
           end try`;
+      } else if (searchIn === 'all') {
+        getMessages = `messages of mb`;
+        postFilter = `
+          set anyMatch to false
+          try
+            if (subject of msg as text) contains "${query}" then set anyMatch to true
+          end try
+          try
+            if (sender of msg as text) contains "${query}" then set anyMatch to true
+          end try
+          try
+            repeat with r in to recipients of msg
+              if (address of r as text) contains "${query}" then set anyMatch to true
+            end repeat
+          end try
+          try
+            if (content of msg as text) contains "${query}" then set anyMatch to true
+          end try
+          if not anyMatch then set matched to false`;
       } else {
-        if (!searchIn) {
-          postFilter = `
-          set subjectMatch to false
-          set senderMatch to false
-          try
-            if (subject of msg as text) contains "${query}" then set subjectMatch to true
-          end try
-          try
-            if (sender of msg as text) contains "${query}" then set senderMatch to true
-          end try
-          if not (subjectMatch or senderMatch) then set matched to false`;
-        }
+        // Default (no searchIn): match subject or sender
+        getMessages = `messages of mb whose (subject contains "${query}" or sender contains "${query}")`;
+        postFilter = '';
       }
 
       let dateChecks = '';
@@ -319,7 +329,7 @@ tell application "Mail"
     }
     repeat with mb in mbList
       try
-        set found to search mb for "${query}"
+        set found to ${getMessages}
         repeat with msg in found
           if resultCount >= ${limit} then exit repeat
           set matched to true${postFilter}${dateChecks}
@@ -927,8 +937,9 @@ describe('Apple Mail MCP Server - End-to-End Tests', () => {
         handlers.mail_search({ query: 'test', searchIn: 'subject' });
 
         const scriptCall = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptCall).toContain('(subject of msg as text) contains');
-        expect(scriptCall).not.toContain('(sender of msg as text) contains');
+        // whose-clause: messages of mb whose subject contains "test"
+        expect(scriptCall).toContain('whose subject contains');
+        expect(scriptCall).not.toContain('whose sender contains');
         expect(scriptCall).not.toContain('(content of msg as text) contains');
       });
 
@@ -939,8 +950,9 @@ describe('Apple Mail MCP Server - End-to-End Tests', () => {
         handlers.mail_search({ query: 'test', searchIn: 'sender' });
 
         const scriptCall = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptCall).not.toContain('(subject of msg as text) contains');
-        expect(scriptCall).toContain('(sender of msg as text) contains');
+        // whose-clause: messages of mb whose sender contains "test"
+        expect(scriptCall).not.toContain('whose subject contains');
+        expect(scriptCall).toContain('whose sender contains');
         expect(scriptCall).not.toContain('(content of msg as text) contains');
       });
 
@@ -975,11 +987,11 @@ describe('Apple Mail MCP Server - End-to-End Tests', () => {
         handlers.mail_search({ query: 'test', searchIn: 'all' });
 
         const scriptCall = mockExecSync.mock.calls[0][0] as string;
-        // With the native search approach, searchIn='all' relies on Mail's built-in
-        // index to cover all fields — no per-field post-filter is needed.
-        expect(scriptCall).toContain('search mb for "test"');
-        expect(scriptCall).not.toContain('(subject of msg as text) contains');
-        expect(scriptCall).not.toContain('(content of msg as text) contains');
+        // whose-clause 'all' mode: post-filters each field individually
+        expect(scriptCall).toContain('(subject of msg as text) contains');
+        expect(scriptCall).toContain('(sender of msg as text) contains');
+        expect(scriptCall).toContain('(content of msg as text) contains');
+        expect(scriptCall).toContain('to recipients of msg');
       });
 
       it('should search subject and sender by default', () => {
@@ -989,8 +1001,9 @@ describe('Apple Mail MCP Server - End-to-End Tests', () => {
         handlers.mail_search({ query: 'test' });
 
         const scriptCall = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptCall).toContain('(subject of msg as text) contains');
-        expect(scriptCall).toContain('(sender of msg as text) contains');
+        // Default whose-clause: messages of mb whose (subject contains "..." or sender contains "...")
+        expect(scriptCall).toContain('subject contains');
+        expect(scriptCall).toContain('sender contains');
         expect(scriptCall).not.toContain('(content of msg as text) contains');
       });
 
