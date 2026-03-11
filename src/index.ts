@@ -109,6 +109,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             query: { type: 'string', description: 'Search query' },
             account: { type: 'string', description: 'Account name (optional)' },
+            mailbox: {
+              type: 'string',
+              description: 'Mailbox name (optional, searches all mailboxes if omitted)',
+            },
             searchIn: {
               type: 'string',
               enum: ['subject', 'sender', 'content', 'all'],
@@ -374,24 +378,64 @@ end tell`;
       }
 
       case 'mail_search': {
-        const { query, limit = 20 } = args as { query: string; limit?: number };
+        const {
+          query,
+          account,
+          mailbox,
+          searchIn = 'all',
+          limit = 20,
+        } = args as {
+          query: string;
+          account?: string;
+          mailbox?: string;
+          searchIn?: string;
+          limit?: number;
+        };
         const safeQuery = escapeAppleScript(query);
+        const safeAccount = account ? escapeAppleScript(account) : '';
+        const safeMailbox = mailbox ? escapeAppleScript(mailbox) : '';
+
+        const matchSubject = searchIn === 'all' || searchIn === 'subject';
+        const matchSender = searchIn === 'all' || searchIn === 'sender';
+        const matchContent = searchIn === 'all' || searchIn === 'content';
+
+        const subjectCheck = matchSubject
+          ? `try
+              if (subject of msg as text) contains "${safeQuery}" then set matched to true
+            end try`
+          : '';
+        const senderCheck = matchSender
+          ? `try
+              if (sender of msg as text) contains "${safeQuery}" then set matched to true
+            end try`
+          : '';
+        const contentCheck = matchContent
+          ? `try
+              if (content of msg as text) contains "${safeQuery}" then set matched to true
+            end try`
+          : '';
+
         const script = `
 tell application "Mail"
   set results to ""
   set resultCount to 0
   repeat with acct in accounts
-    repeat with mb in mailboxes of acct
+    ${account ? `if name of acct is "${safeAccount}" then` : ''}
+    ${
+      mailbox
+        ? `try
+      set mbList to {mailbox "${safeMailbox}" of acct}
+    end try`
+        : 'set mbList to mailboxes of acct'
+    }
+    repeat with mb in mbList
       try
         repeat with msg in messages of mb
           if resultCount < ${limit} then
             set matched to false
-            try
-              if (subject of msg as text) contains "${safeQuery}" then set matched to true
-            end try
-            try
-              if (sender of msg as text) contains "${safeQuery}" then set matched to true
-            end try
+            ${subjectCheck}
+            ${senderCheck}
+            ${contentCheck}
             if matched then
               set msgId to id of msg
               set msgSubject to subject of msg
@@ -408,6 +452,7 @@ tell application "Mail"
         end repeat
       end try
     end repeat
+    ${account ? 'end if' : ''}
   end repeat
   if results is "" then return "No emails found matching: ${safeQuery}"
   return results
