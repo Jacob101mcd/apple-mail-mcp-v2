@@ -18,6 +18,7 @@ const EXPECTED_TOOLS = [
   'mail_get_recent',
   'mail_get_email',
   'mail_search',
+  'mail_get_thread',
   'mail_send',
   'mail_reply',
   'mail_mark_read',
@@ -223,7 +224,8 @@ tell application "Mail"
         set msgSubject to subject of msg
         set msgSender to sender of msg
         set msgDate to date received of msg
-        return "From: " & msgSender & linefeed & "Date: " & msgDate & linefeed & "Subject: " & msgSubject & linefeed & linefeed & msgContent
+        set isRead to read status of msg
+        return "From: " & msgSender & linefeed & "Date: " & msgDate & linefeed & "Subject: " & msgSubject & linefeed & "Read: " & isRead & linefeed & linefeed & msgContent
       end try
     end repeat
   end repeat
@@ -238,68 +240,189 @@ end tell`;
         query,
         account,
         mailbox,
-        searchIn = 'all',
+        searchIn,
+        dateFrom,
+        dateTo,
         limit = 20,
       } = args as {
         query: string;
         account?: string;
         mailbox?: string;
-        searchIn?: string;
+        searchIn?: 'subject' | 'sender' | 'recipients' | 'content' | 'all';
+        dateFrom?: string;
+        dateTo?: string;
         limit?: number;
       };
-      const safeQuery = escapeAppleScript(query);
-      const safeAccount = account ? escapeAppleScript(account) : '';
-      const safeMailbox = mailbox ? escapeAppleScript(mailbox) : '';
 
-      const matchSubject = searchIn === 'all' || searchIn === 'subject';
-      const matchSender = searchIn === 'all' || searchIn === 'sender';
-      const matchContent = searchIn === 'all' || searchIn === 'content';
+      let getMessages: string;
+      let postFilter: string;
 
-      const subjectCheck = matchSubject
-        ? `try
-              if (subject of msg as text) contains "${safeQuery}" then set matched to true
-            end try`
-        : '';
-      const senderCheck = matchSender
-        ? `try
-              if (sender of msg as text) contains "${safeQuery}" then set matched to true
-            end try`
-        : '';
-      const contentCheck = matchContent
-        ? `try
-              if (content of msg as text) contains "${safeQuery}" then set matched to true
-            end try`
-        : '';
+      if (searchIn === 'subject') {
+        getMessages = `messages of mb whose subject contains "${query}"`;
+        postFilter = '';
+      } else if (searchIn === 'sender') {
+        getMessages = `messages of mb whose sender contains "${query}"`;
+        postFilter = '';
+      } else if (searchIn === 'recipients') {
+        getMessages = `messages of mb`;
+        postFilter = `
+          set matched to false
+          try
+            repeat with r in to recipients of msg
+              if (address of r as text) contains "${query}" then set matched to true
+            end repeat
+          end try`;
+      } else if (searchIn === 'content') {
+        getMessages = `messages of mb`;
+        postFilter = `
+          try
+            if not ((content of msg as text) contains "${query}") then set matched to false
+          end try`;
+      } else if (searchIn === 'all') {
+        getMessages = `messages of mb`;
+        postFilter = `
+          set anyMatch to false
+          try
+            if (subject of msg as text) contains "${query}" then set anyMatch to true
+          end try
+          try
+            if (sender of msg as text) contains "${query}" then set anyMatch to true
+          end try
+          try
+            repeat with r in to recipients of msg
+              if (address of r as text) contains "${query}" then set anyMatch to true
+            end repeat
+          end try
+          try
+            if (content of msg as text) contains "${query}" then set anyMatch to true
+          end try
+          if not anyMatch then set matched to false`;
+      } else {
+        // Default (no searchIn): match subject or sender
+        getMessages = `messages of mb whose (subject contains "${query}" or sender contains "${query}")`;
+        postFilter = '';
+      }
+
+      let dateChecks = '';
+      if (dateFrom) {
+        dateChecks += `
+          if (date received of msg) < date "${dateFrom}" then set matched to false`;
+      }
+      if (dateTo) {
+        dateChecks += `
+          if (date received of msg) > date "${dateTo}" then set matched to false`;
+      }
 
       const script = `
 tell application "Mail"
   set results to ""
   set resultCount to 0
   repeat with acct in accounts
-    ${account ? `if name of acct is "${safeAccount}" then` : ''}
+    ${account ? `if name of acct is "${account}" then` : ''}
     ${
       mailbox
-        ? `try
-      set mbList to {mailbox "${safeMailbox}" of acct}
+        ? `set mbList to {}
+    try
+      set end of mbList to mailbox "${mailbox}" of acct
     end try`
         : 'set mbList to mailboxes of acct'
     }
     repeat with mb in mbList
       try
+        set found to ${getMessages}
+        repeat with msg in found
+          if resultCount >= ${limit} then exit repeat
+          set matched to true${postFilter}${dateChecks}
+          if matched then
+            set msgId to id of msg
+            set msgSubject to subject of msg
+            set msgSender to sender of msg
+            set msgDate to date received of msg
+            set isRead to read status of msg
+            set readMarker to ""
+            if not isRead then set readMarker to "[UNREAD] "
+            set results to results & readMarker & "ID: " & msgId & linefeed
+            set results to results & "From: " & msgSender & linefeed
+            set results to results & "Subject: " & msgSubject & linefeed
+            set results to results & "Date: " & msgDate & linefeed
+            set results to results & "Location: " & name of acct & " / " & name of mb & linefeed & linefeed
+            set resultCount to resultCount + 1
+          end if
+        end repeat
+      end try
+      if resultCount >= ${limit} then exit repeat
+    end repeat
+    ${account ? 'end if' : ''}
+    if resultCount >= ${limit} then exit repeat
+  end repeat
+  if results is "" then return "No emails found matching: ${query}"
+  return results
+end tell`;
+      const result = runAppleScript(script);
+      return { content: [{ type: 'text', text: result }] };
+    },
+
+    mail_get_thread: (args: Record<string, unknown>): ReturnType<ToolHandler> => {
+      const { limit = 50 } = args as { emailId: string; limit?: number };
+      const emailId = args.emailId as string;
+      const script = `
+tell application "Mail"
+  set refMsg to missing value
+  repeat with acct in accounts
+    repeat with mb in mailboxes of acct
+      try
+        set refMsg to first message of mb whose id is ${emailId}
+        exit repeat
+      end try
+    end repeat
+    if refMsg is not missing value then exit repeat
+  end repeat
+  if refMsg is missing value then return "Email not found with ID: ${emailId}"
+
+  set baseSubj to subject of refMsg
+  repeat
+    set changed to false
+    if baseSubj starts with "Re: " then
+      set baseSubj to text 5 thru -1 of baseSubj
+      set changed to true
+    end if
+    if baseSubj starts with "Fwd: " then
+      set baseSubj to text 6 thru -1 of baseSubj
+      set changed to true
+    end if
+    if not changed then exit repeat
+  end repeat
+
+  set results to ""
+  set resultCount to 0
+  repeat with acct in accounts
+    repeat with mb in mailboxes of acct
+      try
         repeat with msg in messages of mb
           if resultCount < ${limit} then
-            set matched to false
-            ${subjectCheck}
-            ${senderCheck}
-            ${contentCheck}
-            if matched then
+            set msgSubj to subject of msg
+            repeat
+              set changed to false
+              if msgSubj starts with "Re: " then
+                set msgSubj to text 5 thru -1 of msgSubj
+                set changed to true
+              end if
+              if msgSubj starts with "Fwd: " then
+                set msgSubj to text 6 thru -1 of msgSubj
+                set changed to true
+              end if
+              if not changed then exit repeat
+            end repeat
+            if msgSubj is baseSubj then
               set msgId to id of msg
-              set msgSubject to subject of msg
               set msgSender to sender of msg
               set msgDate to date received of msg
-              set results to results & "ID: " & msgId & linefeed
+              set isRead to read status of msg
+              set readMarker to ""
+              if not isRead then set readMarker to "[UNREAD] "
+              set results to results & readMarker & "ID: " & msgId & linefeed
               set results to results & "From: " & msgSender & linefeed
-              set results to results & "Subject: " & msgSubject & linefeed
+              set results to results & "Subject: " & (subject of msg) & linefeed
               set results to results & "Date: " & msgDate & linefeed
               set results to results & "Location: " & name of acct & " / " & name of mb & linefeed & linefeed
               set resultCount to resultCount + 1
@@ -308,9 +431,8 @@ tell application "Mail"
         end repeat
       end try
     end repeat
-    ${account ? 'end if' : ''}
   end repeat
-  if results is "" then return "No emails found matching: ${safeQuery}"
+  if results is "" then return "No thread messages found"
   return results
 end tell`;
       const result = runAppleScript(script);
@@ -561,29 +683,7 @@ describe('Apple Mail MCP Server - End-to-End Tests', () => {
       const _server = createMockServer();
 
       // Define tool definitions for verification
-      const toolDefinitions = [
-        {
-          name: 'mail_get_accounts',
-          description: 'Get all email accounts configured in Apple Mail',
-        },
-        { name: 'mail_get_mailboxes', description: 'Get all mailboxes for an account' },
-        { name: 'mail_get_unread', description: 'Get unread emails' },
-        { name: 'mail_get_recent', description: 'Get recent emails (read and unread)' },
-        { name: 'mail_get_email', description: 'Get full content of a specific email by ID' },
-        { name: 'mail_search', description: 'Search emails by subject, sender, or content' },
-        { name: 'mail_send', description: 'Send a new email' },
-        { name: 'mail_reply', description: 'Reply to an email' },
-        { name: 'mail_mark_read', description: 'Mark email(s) as read' },
-        { name: 'mail_mark_unread', description: 'Mark email as unread' },
-        { name: 'mail_delete', description: 'Delete an email (move to trash)' },
-        { name: 'mail_move', description: 'Move email to a different mailbox' },
-        {
-          name: 'mail_unread_count',
-          description: 'Get count of unread emails per account/mailbox',
-        },
-        { name: 'mail_open', description: 'Open the Mail app' },
-        { name: 'mail_check', description: 'Check for new mail' },
-      ];
+      const toolDefinitions = EXPECTED_TOOLS.map((name) => ({ name }));
 
       // Verify all expected tools are defined
       const toolNames = toolDefinitions.map((t) => t.name);
@@ -801,70 +901,174 @@ describe('Apple Mail MCP Server - End-to-End Tests', () => {
       });
 
       it('should filter by account when account parameter is provided', () => {
-        const mockResponse =
-          'ID: 12345\nFrom: test@example.com\nSubject: Meeting\nDate: Today\nLocation: iCloud / INBOX';
-        mockExecSync.mockReturnValue(mockResponse);
+        mockExecSync.mockReturnValue('No emails found matching: test');
 
         const handlers = createToolHandlers();
-        handlers.mail_search({ query: 'Meeting', account: 'iCloud' });
+        handlers.mail_search({ query: 'test', account: 'Work Account' });
 
-        const scriptArg = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptArg).toContain('if name of acct is "iCloud" then');
-        expect(scriptArg).toContain('end if');
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).toContain('if name of acct is "Work Account"');
+      });
+
+      it('should search all accounts when account is not provided', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).not.toContain('if name of acct is');
       });
 
       it('should filter by mailbox when mailbox parameter is provided', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', mailbox: 'INBOX' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).toContain('mailbox "INBOX"');
+      });
+
+      it('should only search subject when searchIn is "subject"', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', searchIn: 'subject' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        // whose-clause: messages of mb whose subject contains "test"
+        expect(scriptCall).toContain('whose subject contains');
+        expect(scriptCall).not.toContain('whose sender contains');
+        expect(scriptCall).not.toContain('(content of msg as text) contains');
+      });
+
+      it('should only search sender when searchIn is "sender"', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', searchIn: 'sender' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        // whose-clause: messages of mb whose sender contains "test"
+        expect(scriptCall).not.toContain('whose subject contains');
+        expect(scriptCall).toContain('whose sender contains');
+        expect(scriptCall).not.toContain('(content of msg as text) contains');
+      });
+
+      it('should only search recipients when searchIn is "recipients"', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', searchIn: 'recipients' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).not.toContain('(subject of msg as text) contains');
+        expect(scriptCall).not.toContain('(sender of msg as text) contains');
+        expect(scriptCall).toContain('to recipients of msg');
+      });
+
+      it('should only search content when searchIn is "content"', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', searchIn: 'content' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).not.toContain('(subject of msg as text) contains');
+        expect(scriptCall).not.toContain('(sender of msg as text) contains');
+        expect(scriptCall).toContain('(content of msg as text) contains');
+      });
+
+      it('should search all fields when searchIn is "all"', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', searchIn: 'all' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        // whose-clause 'all' mode: post-filters each field individually
+        expect(scriptCall).toContain('(subject of msg as text) contains');
+        expect(scriptCall).toContain('(sender of msg as text) contains');
+        expect(scriptCall).toContain('(content of msg as text) contains');
+        expect(scriptCall).toContain('to recipients of msg');
+      });
+
+      it('should search subject and sender by default', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        // Default whose-clause: messages of mb whose (subject contains "..." or sender contains "...")
+        expect(scriptCall).toContain('subject contains');
+        expect(scriptCall).toContain('sender contains');
+        expect(scriptCall).not.toContain('(content of msg as text) contains');
+      });
+
+      it('should add dateFrom filter when provided', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', dateFrom: '2026-01-01' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).toContain('date "2026-01-01"');
+      });
+
+      it('should add dateTo filter when provided', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', dateTo: '2026-03-01' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).toContain('date "2026-03-01"');
+      });
+
+      it('should include both date filters when both provided', () => {
+        mockExecSync.mockReturnValue('No emails found matching: test');
+
+        const handlers = createToolHandlers();
+        handlers.mail_search({ query: 'test', dateFrom: '2026-01-01', dateTo: '2026-03-01' });
+
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).toContain('date "2026-01-01"');
+        expect(scriptCall).toContain('date "2026-03-01"');
+      });
+    });
+
+    describe('mail_get_thread', () => {
+      it('should return thread messages', () => {
         const mockResponse =
-          'ID: 12345\nFrom: test@example.com\nSubject: Meeting\nDate: Today\nLocation: Work / INBOX';
+          'ID: 12345\nFrom: test@example.com\nSubject: Meeting Tomorrow\nDate: Today\nLocation: Work / INBOX';
         mockExecSync.mockReturnValue(mockResponse);
 
         const handlers = createToolHandlers();
-        handlers.mail_search({ query: 'Meeting', mailbox: 'INBOX' });
+        const result = handlers.mail_get_thread({ emailId: '12345' });
 
-        const scriptArg = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptArg).toContain('mailbox "INBOX"');
+        expect(result.content[0].text).toContain('Meeting Tomorrow');
       });
 
-      it('should search only in subject when searchIn is subject', () => {
-        mockExecSync.mockReturnValue(
-          'ID: 12345\nFrom: test@example.com\nSubject: Meeting\nDate: Today\nLocation: Work / INBOX'
-        );
+      it('should handle email not found', () => {
+        mockExecSync.mockReturnValue('Email not found with ID: 99999');
 
         const handlers = createToolHandlers();
-        handlers.mail_search({ query: 'Meeting', searchIn: 'subject' });
+        const result = handlers.mail_get_thread({ emailId: '99999' });
 
-        const scriptArg = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptArg).toContain('(subject of msg as text) contains');
-        expect(scriptArg).not.toContain('(sender of msg as text) contains');
-        expect(scriptArg).not.toContain('(content of msg as text) contains');
+        expect(result.content[0].text).toContain('Email not found');
       });
 
-      it('should search only in sender when searchIn is sender', () => {
-        mockExecSync.mockReturnValue(
-          'ID: 12345\nFrom: test@example.com\nSubject: Meeting\nDate: Today\nLocation: Work / INBOX'
-        );
+      it('should generate script with Re:/Fwd: stripping logic', () => {
+        mockExecSync.mockReturnValue('No thread messages found');
 
         const handlers = createToolHandlers();
-        handlers.mail_search({ query: 'test@example.com', searchIn: 'sender' });
+        handlers.mail_get_thread({ emailId: '12345' });
 
-        const scriptArg = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptArg).toContain('(sender of msg as text) contains');
-        expect(scriptArg).not.toContain('(subject of msg as text) contains');
-        expect(scriptArg).not.toContain('(content of msg as text) contains');
-      });
-
-      it('should search in content when searchIn is content', () => {
-        mockExecSync.mockReturnValue(
-          'ID: 12345\nFrom: test@example.com\nSubject: Meeting\nDate: Today\nLocation: Work / INBOX'
-        );
-
-        const handlers = createToolHandlers();
-        handlers.mail_search({ query: 'hello', searchIn: 'content' });
-
-        const scriptArg = mockExecSync.mock.calls[0][0] as string;
-        expect(scriptArg).toContain('(content of msg as text) contains');
-        expect(scriptArg).not.toContain('(subject of msg as text) contains');
-        expect(scriptArg).not.toContain('(sender of msg as text) contains');
+        const scriptCall = mockExecSync.mock.calls[0][0] as string;
+        expect(scriptCall).toContain('starts with "Re: "');
+        expect(scriptCall).toContain('starts with "Fwd: "');
       });
     });
 
